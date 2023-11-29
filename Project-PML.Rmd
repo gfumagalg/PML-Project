@@ -1,0 +1,222 @@
+---
+title: "Practical Machine Learning Project"
+author: "Gerardo Fumagal"
+date: "2023-11-14"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Introduction
+
+The following exercise is part of the course of Data Sciences in Coursera and it
+is intended to be used for the application of methods and techniques of Machine
+Learning. The problem consists on predicting the way a workout (barbell lifts) 
+is being realized by gathering information from sensors attached to each 
+participant while performing the exercises. A variable named classe is the level 
+of quality of the exercise and is the output to be predicted. The information 
+has been download from http://groupware.les.inf.puc-rio.br/har in the section 
+Weight Lifting Exercise Dataset.
+
+```{r setup, include=TRUE}
+library(caret)
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+```
+
+# Input data
+
+To read the data we will use the read_csv function within readr library since the
+data is in a csv file, both training and testing dataset will e store as data 
+frames, the training set is going to be named as raw data because we will have 
+to manipulate it to get it into a tidy form.
+
+```{r reading data, include=FALSE}
+training_raw <- read_csv("pml-training.csv", col_names = TRUE)
+testing <- read_csv("pml-testing.csv", col_names = TRUE)
+```
+
+# Exploratory Data Analysis
+
+The database contains columns with no relevant information about the output to 
+predict. These are the very first 7 columns, which contain the user name, window
+number, time, and other inputs not related to the quality of the workout. These
+columns will be eliminated for the analysis. Also, let's explore if there are
+NAs in the columns:
+
+```{r EDA-1, include=TRUE}
+predictors <- training_raw[,c(8:ncol(training_raw))]
+length(which(colSums(is.na(predictors)) > 0))
+```
+
+Remaining columns contain NAs, we need to evaluate which variables have enough 
+information to contribute as predictors. The following code will identify 
+columns with less than 20% of values in each observation, those variables won't 
+be included on the analysis.
+
+```{r EDA-2, include=TRUE, results='hide'}
+drop_list <- which(colSums(!is.na(predictors)) < 0.2*nrow(predictors))
+predictors <- predictors[,-drop_list]
+sum(colSums(is.na(predictors)))
+sum(!lapply(predictors[,-53],class) == "numeric")
+```
+
+Now the database is tidy because there is no NA, no need to impute values and 
+the data is 19622 observations with 52 predictors and 1 output variable and 
+ready for analysis. All 52 predictors are numerical variables, one more detail 
+is to change the output variable classe to a factor, so to use caret functions 
+for fitting a model. 
+
+```{r EDA-3, include=TRUE}
+predictors$classe <- as.factor(predictors$classe)
+dim(predictors)
+str(predictors$classe)
+``` 
+
+Now the output variable is facgorial with 5 levels which classify the quality of
+the workout. Let's look at the predictors to find correlations that allows to simplify the database, first determine the variables with near zero variances:
+
+```{r EDA-4, include=TRUE}
+nsv <- nearZeroVar(predictors,saveMetrics = TRUE)
+which(nsv$zeroVar & nsv$zeroVar)
+``` 
+
+There is no Near Zero Variances variables, next step is to build a correlation
+matrix among the predictors and identify those which correlation is higher than
+0.8 to be considered co linear. The following code does that and display a table
+of variable's correlation:
+
+```{r EDA-5, include=TRUE}
+M <- abs(cor(predictors[,-53]))
+diag(M) <- 0
+which(M > 0.8,arr.ind=TRUE)
+``` 
+
+It's noticed there are some variables correlated, one way to handle them and
+simplify the fitting of the model is to use PCA pre-processing to reduce the 
+number of variables.
+
+# Cross validation
+
+The strategy to find a predicting model is to try 3 different methods, having in
+mind that the output variables is a multi-factor with 5 levels which means our 
+method should be as the classification type. For this exercise the options for
+method will be:
+
+a) Random Forest, is both Classification and Regression method
+b) Generalized Linear Model, is both Classification and Regression method using
+   multinomial type.
+c) Bagged, also a Classification. adn Regression method
+
+In order to select the best option for a method, the predictor dataset will be 
+split into Training and Validation, the split will be done by picking a defined
+percentage of random data per level of the classe variable, this can be done by
+using the createDatapartition function and set classe as input:
+
+```{r CV-1, include=TRUE, echo=TRUE}
+set.seed(123)
+inTrain <- createDataPartition(predictors$classe, p=0.7, list=FALSE)
+
+training <- predictors[inTrain,]
+validation <- predictors[-inTrain,]
+``` 
+
+# Pre-processing
+
+As mentioned before, since there are some predictors that probed to be colinear
+a PCA pre-processing method is going to be use to simplify the analysis. The 
+function train have this option.
+
+# Fitting a model
+
+1) The first option to be use is the random forest method, there is no need for
+further transformation or manipulation of the data:
+
+```{r fitting-2 rf, include=TRUE, echo=TRUE, cache=TRUE}
+model_rf <- train(classe ~ ., data = training, preProcess="pca",
+               method = 'rf', tuneLength = 1)
+``` 
+
+Now we will get the confusion matrix to revew the results of the model in the
+validation dataset:
+
+```{r fitting-3 rf confusion matrix, include=TRUE, echo=TRUE, cache=TRUE}
+confusionMatrix(validation$classe,predict(model_rf,validation))
+```
+
+The model is quite accurate in 97.6% , class C is where most of the misses occur
+and a p-value of 2.2e-16.
+
+2) Next is to fit a model using Generalized Linear Model with the train 
+function:
+
+```{r fitting-4 glm, include=TRUE, echo=TRUE, cache=TRUE}
+model_glm <- train(classe ~ ., data = training,
+                 preProcess=c("pca","center","scale"),
+                 method = 'glmnet',family="multinomial",
+                 type.multinomial="grouped")
+``` 
+
+Let's review the confusion matrix:
+
+```{r fitting-5 glm, include=TRUE,echo=TRUE, cache=TRUE}
+confusionMatrix(validation$classe,predict(model_glm,validation))
+```
+
+GLM fits a model with a 53.2% accuracy, classification error is distributed in
+all classes.
+
+3) Last is a model fit with bagging method:
+
+```{r fitting-6 bag, include=TRUE, echo=TRUE, cache=TRUE}
+model_bag <- train(classe ~ ., data = training, preProcess="pca",
+                  method = 'treebag', mfinal =25,
+                  tuneLength = 1)
+```
+
+And the confusion matrix will show:
+
+```{r fitting-7 bag, include=TRUE,echo=TRUE, cache=TRUE}
+confusionMatrix(validation$classe,predict(model_bag,validation))
+```
+
+Bagging model achieves a 96.2 % accuracy.
+
+Random Forest model seems to have a better results on predicting the validation
+dataset than the other 2 models (glm,bag), the out of sample error is expected
+to be a 0.034% vs 0.038% for the bagging model, hence, we will use random forest
+to make the prediction on the test dataset.
+
+# Prediction on Testing dataset
+
+Using the random forest model, let's predict the classe on each of the 
+observations in the testing dataset, then add the results to the testing data
+frame:
+
+```{r Prediction-1 Predict with rf model, include=TRUE, echo=FALSE}
+testing <- mutate(testing, classe = predict(model_rf,testing))
+toprint <- testing[,c(160,161)]
+```
+
+Below is the results of the prediction:
+
+```{r Printing results, include=TRUE, echo=FALSE}
+print(toprint)
+```
+Based on a 0.034% out of sample error, it is expected to have as much as 1 miss
+value on the testing dataset.
+
+
+# Conclusions:
+
+In this paper we tried 3 different methods to predict a classification 
+multinomial problem, after cleaning the database and determining the 
+co-linearity among variables, and decide to apply PCA for pre-processing 
+variables, the random forest method probed to be the most accurate (97.3%). 
+Bagging method was the second best accurate with a 95.9%, while Generalized 
+Linear Model was the least accurate by more than 43 percentage points. These 
+results suggest that the data is quite non-linear and that Random Forest and
+Bagging methods are better for a classification problem.
+
